@@ -1,28 +1,185 @@
+# 油价新闻分析系统
+
+基于多Agent架构的油价新闻智能分析系统，自动判断新闻与油价的关联性，评估影响力度，并生成综合风险报告。
+
+
 ## 项目结构
 
-```text
-main.py                        # 程序入口，串联整个流程
-config.py                      # 配置项：文件路径、并发、LLM 等
-crawler.py                     # 简单爬虫，从新闻 URL 抓取正文文本
-data_loader.py                 # 读取输入 CSV、保存分析结果
-llm_client.py                  # 封装 LLM 调用逻辑
-data/                          # 输入数据目录
-  input.csv                    # 原始新闻列表（id,title,date,category,url）
-output/                        # 输出结果目录
-  analysis_result.csv          # 按分类汇总的 LLM 分析结果
-README.md                      # 项目说明（当前文件）
+```
+textanalysis/
+├── config.py                  # 配置文件
+├── main.py                    # 主程序入口
+├── crawler.py                 # 网页爬虫
+├── data_loader.py             # 数据加载器
+├── llm_client.py              # LLM客户端
+│
+├── agents/                    # Agent模块
+│   ├── __init__.py
+│   ├── base_agent.py          # Agent基类
+│   ├── relevance_agent.py     # Agent1: 油价关联验证
+│   ├── impact_agent.py        # Agent2: 影响力度评分
+│   └── causality_agent.py     # Agent3: 因果校验
+│
+├── database/                  # 数据库模块
+│   ├── __init__.py
+│   ├── models.py              # ORM模型
+│   └── repository.py          # 数据库操作
+│
+├── workflow/                  # 工作流引擎
+│   ├── __init__.py
+│   ├── nodes.py               # 工作流节点
+│   └── pipeline.py            # 流水线管理
+│
+├── services/                  # 业务服务
+│   ├── __init__.py
+│   ├── aggregator.py          # 日度聚合
+│   └── report_generator.py    # 报告生成
+│
+├── data/                      # 数据目录
+│   ├── input.csv              # 输入数据
+│   └── oil_events.db          # SQLite数据库
+│
+└── output/                    # 输出目录
 ```
 
-## 整体流程说明
+## Agent说明
 
-程序从 `data/input.csv` 中读取一批新闻（包含编号、标题、日期、分类和 URL），然后并发地对每条新闻的 URL 进行网页抓取，只保留正文文本。抓取完成后，脚本会按 `category` 对新闻分组，把每一类下的多篇新闻摘要打包成提示词，调用 LLM 进行整体分析，判断该类别新闻对国际油价的大致影响及主要逻辑。
+### Agent1: 关联性验证 (RelevanceAgent)
 
-最后，程序将每个分类的新闻数量、涉及的 ID/标题以及对应的 LLM 分析结果写入 `output/analysis_result.csv`，便于后续在 Excel 或其他工具中查看和进一步处理。
+判断新闻是否与国际油价直接相关。
 
-## 接口设计
-- 输入
-  - 一个包含文本数据的 CSV/Excel 文件
-  - 字段: id,title,data,category,url
-- 输出
-  - 一个 CSV 文件
-  - 字段：分类,新闻数量,涉及新闻ID,涉及新闻标题,分类LLM分析结果
+**输出:**
+- `is_oil_related`: 是否相关 (bool)
+- `confidence`: 置信度 (0-1)
+- `reason`: 判断原因
+
+### Agent2: 影响力度评分 (ImpactAgent)
+
+评估油价相关新闻的影响方向和力度。
+
+**输出:**
+- `direction`: 影响方向 (利好/利空/中性)
+- `score`: 影响评分 (-10 到 +10)
+- `factors`: 影响因素列表
+- `time_horizon`: 影响时效 (短期/中期/长期)
+
+### Agent3: 因果校验 (CausalityAgent)
+
+对影响评估进行因果链验证，确保分析逻辑严密。
+
+**输出:**
+- `verified`: 因果链是否合理 (bool)
+- `adjusted_score`: 调整后评分
+- `causal_chain`: 因果链条
+- `warnings`: 风险提示
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+pip install pandas requests beautifulsoup4 sqlalchemy
+```
+
+### 2. 配置
+
+编辑 `config.py` 设置你的LLM API密钥：
+
+```python
+LLM_API_KEY = "your-api-key"
+LLM_BASE_URL = "https://api.deepseek.com/v1"
+LLM_MODEL = "deepseek-chat"
+```
+
+或通过环境变量设置：
+
+```bash
+export LLM_API_KEY="your-api-key"
+export LLM_BASE_URL="https://api.deepseek.com/v1"
+export LLM_MODEL="deepseek-chat"
+```
+
+### 3. 准备输入数据
+
+在 `data/input.csv` 中准备新闻数据，格式如下：
+
+```csv
+id,title,date,category,url
+1,新闻标题,2024-01-01,分类,https://example.com/news/1
+```
+
+### 4. 运行
+
+```bash
+python main.py
+```
+
+## 输出说明
+
+### 文本报告示例
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║                    📊 油价影响日度报告                         ║
+╠══════════════════════════════════════════════════════════════╣
+║  日期: 2024-01-28                                            
+╚══════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────┐
+│ 📈 综合评估                                                  │
+├─────────────────────────────────────────────────────────────┤
+│   综合评分: +3.50                                            │
+│   风险等级: 【轻度利好】                                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 数据库表结构
+
+**oil_events**: 存储每条分析过的事件
+- 新闻基础信息
+- Agent1/2/3的分析结果
+- 原始内容和元数据
+
+**daily_risk_summary**: 存储每日汇总
+- 综合评分和风险等级
+- 各方向事件统计
+- 关键事件列表
+
+## 配置选项
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `RELEVANCE_CONFIDENCE_THRESHOLD` | 关联性置信度阈值 | 0.6 |
+| `SIMILAR_EVENTS_DAYS` | 查询历史同类事件天数 | 30 |
+| `SIMILAR_EVENTS_LIMIT` | 返回同类事件数量 | 5 |
+| `MAX_CONTENT_LENGTH` | 发送LLM的最大内容长度 | 4000 |
+| `WORKFLOW_RETRY_COUNT` | 节点失败重试次数 | 2 |
+
+## 扩展开发
+
+### 添加新的Agent
+
+1. 在 `agents/` 目录创建新文件
+2. 继承 `BaseAgent` 类
+3. 实现 `execute()` 和 `build_prompt()` 方法
+4. 在 `main.py` 中注册到工作流
+
+### 自定义工作流节点
+
+```python
+from workflow import WorkflowNode, NodeResult
+from workflow.nodes import NodeStatus
+
+node = WorkflowNode(
+    name="my_node",
+    handler=my_handler_function,
+    description="自定义节点",
+    next_node="next_node_name"
+)
+
+pipeline.register(node)
+```
+
+## 许可证
+
+MIT License
