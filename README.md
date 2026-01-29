@@ -163,6 +163,7 @@ for event in events:
 ```
 
 
-## 许可证
-
-MIT License
+## TODO
+- 加强爬虫能力
+- 加强llm_client对输出的检查，重试
+- 优化agents里面的prompt
