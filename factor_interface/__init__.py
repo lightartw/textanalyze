@@ -1,11 +1,7 @@
-"""因子组接口模块。"""
-from .factor_builder import build_factor_series
-from .factor_exporter import export_factor_csv, export_factor_doc
-from .factor_schema import TEXT_FACTOR_CATEGORIES
+# factor_interface/__init__.py
+"""因子接口模块 - 事件类型定义。"""
+from .factor_schema import EVENT_TYPES
 
 __all__ = [
-    "build_factor_series",
-    "export_factor_csv",
-    "export_factor_doc",
-    "TEXT_FACTOR_CATEGORIES",
+    "EVENT_TYPES",
 ]

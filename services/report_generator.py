@@ -1,210 +1,235 @@
 # services/report_generator.py
 """
-因子报告生成服务
-生成包含 LLM 分析原因的详细因子报告
+报告生成服务 - 从数据库读取数据生成报告
 """
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import os
+import json
 
 
 class ReportGenerator:
-    """生成文本因子摘要报告。"""
+    """生成分析报告，数据源来自数据库。"""
 
-    # 影响程度映射
-    IMPACT_MAGNITUDE_MAP = {
-        "low": "低",
-        "medium": "中",
-        "high": "高",
-    }
-    
-    # 时间范围映射
-    TIME_HORIZON_MAP = {
-        "short": "短期",
-        "medium": "中期",
-        "long": "长期",
-    }
-
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str = "output"):
         self.output_dir = output_dir
-        self._ensure_output_dir()
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
-    def _ensure_output_dir(self) -> None:
-        """确保输出目录存在。"""
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
-
-    def generate_summary(self, summary: Dict[str, Any]) -> str:
-        """生成日度因子摘要文本（包含 LLM 分析详情）。"""
-        date_str = summary.get("summary_date")
-        if isinstance(date_str, datetime):
-            date_str = date_str.strftime("%Y-%m-%d")
-
-        counts = summary.get("factor_category_counts", {})
-        counts_text = ", ".join([f"{k}:{v}" for k, v in counts.items()]) or "无"
+    def save_results(
+        self, 
+        results: List[Dict[str, Any]], 
+        filename: Optional[str] = None
+    ) -> str:
+        """
+        保存结果到JSON文件。
         
-        # 计算整体市场倾向
-        avg_value = summary.get("avg_factor_value", 0)
-        market_trend = self._get_market_trend(avg_value)
-
-        lines = [
-            "=" * 70,
-            "文本因子日度分析报告",
-            "=" * 70,
-            "",
-            "【基础统计】",
-            f"  报告日期: {date_str}",
-            f"  总事件数: {summary.get('total_events', 0)}",
-            f"  油价相关事件: {summary.get('oil_related_events', 0)}",
-            f"  平均因子值: {avg_value}",
-            f"  市场倾向: {market_trend}",
-            f"  分类统计: {counts_text}",
-            "",
-        ]
-
-        # 添加详细事件分析
-        event_analyses = summary.get("event_analyses", [])
-        if event_analyses:
-            lines.extend(self._render_event_analyses(event_analyses))
-        
-        # 添加被跳过的事件
-        skipped_events = summary.get("skipped_events", [])
-        if skipped_events:
-            lines.extend(self._render_skipped_events(skipped_events))
-        
-        lines.append("=" * 70)
-        lines.append("报告结束")
-        lines.append("=" * 70)
-        
-        return "\n".join(lines)
-
-    def _get_market_trend(self, avg_value: float) -> str:
-        """根据平均因子值判断市场倾向。"""
-        if avg_value > 0.3:
-            return "强烈利多"
-        elif avg_value > 0.1:
-            return "温和利多"
-        elif avg_value > -0.1:
-            return "中性"
-        elif avg_value > -0.3:
-            return "温和利空"
-        else:
-            return "强烈利空"
-
-    def _render_event_analyses(self, events: List[Dict[str, Any]]) -> List[str]:
-        """渲染油价相关事件的详细分析。"""
-        lines = [
-            "-" * 70,
-            "【油价相关事件详细分析】",
-            "-" * 70,
-        ]
-        
-        for i, event in enumerate(events, 1):
-            title = event.get("title", "未知标题")
-            # 截断过长标题
-            if len(title) > 60:
-                title = title[:57] + "..."
+        Args:
+            results: 结果列表
+            filename: 文件名（默认按时间生成）
             
-            category = event.get("factor_category", "未分类")
-            confidence = event.get("classify_confidence", 0)
-            factor_value = event.get("factor_value", 0)
-            adjusted_value = event.get("adjusted_factor_value", factor_value)
-            
-            impact = self.IMPACT_MAGNITUDE_MAP.get(
-                event.get("impact_magnitude", ""), 
-                event.get("impact_magnitude", "未知")
-            )
-            horizon = self.TIME_HORIZON_MAP.get(
-                event.get("time_horizon", ""),
-                event.get("time_horizon", "未知")
-            )
-            
-            keywords = event.get("keywords_found", [])
-            keywords_text = ", ".join(keywords) if keywords else "无"
-            
-            classify_reason = event.get("classify_reason", "") or "无"
-            quant_logic = event.get("quantification_logic", "") or "无"
-            adjustment_reason = event.get("adjustment_reason", "") or "无调整"
-            hist_consistency = event.get("historical_consistency", "") or "无历史参考"
-            
-            # 因子值是否被调整
-            value_adjusted = abs(adjusted_value - factor_value) > 0.001
-            value_display = f"{adjusted_value}"
-            if value_adjusted:
-                value_display = f"{adjusted_value} (原值: {factor_value})"
-            
-            lines.extend([
-                "",
-                f"事件 {i}: {title}",
-                f"  ├─ 因子分类: {category}",
-                f"  ├─ 分类置信度: {confidence:.2f}",
-                f"  ├─ 关键词: {keywords_text}",
-                f"  ├─ 因子值: {value_display}",
-                f"  ├─ 影响程度: {impact}",
-                f"  ├─ 影响周期: {horizon}",
-                f"  │",
-                f"  ├─ [分类原因]",
-                f"  │  {self._indent_text(classify_reason, 5)}",
-                f"  │",
-                f"  ├─ [量化依据]",
-                f"  │  {self._indent_text(quant_logic, 5)}",
-                f"  │",
-                f"  ├─ [校验调整]",
-                f"  │  {self._indent_text(adjustment_reason, 5)}",
-                f"  │",
-                f"  └─ [历史一致性]",
-                f"     {self._indent_text(hist_consistency, 5)}",
-            ])
+        Returns:
+            保存的文件路径
+        """
+        if filename is None:
+            filename = f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
-        lines.append("")
-        return lines
-
-    def _render_skipped_events(self, events: List[Dict[str, Any]]) -> List[str]:
-        """渲染被跳过的无关事件。"""
-        lines = [
-            "-" * 70,
-            "【已跳过的无关事件】",
-            "-" * 70,
-        ]
-        
-        for i, event in enumerate(events, 1):
-            title = event.get("title", "未知标题")
-            if len(title) > 50:
-                title = title[:47] + "..."
-            reason = event.get("skip_reason", "与油价无关")
-            lines.append(f"  {i}. {title}")
-            lines.append(f"     跳过原因: {reason}")
-        
-        lines.append("")
-        return lines
-
-    def _indent_text(self, text: str, indent: int = 3) -> str:
-        """处理多行文本的缩进。"""
-        if not text:
-            return "无"
-        # 将长文本按适当宽度换行
-        max_width = 60
-        words = text.replace("\n", " ").split()
-        lines = []
-        current_line = ""
-        
-        for word in words:
-            if len(current_line) + len(word) + 1 <= max_width:
-                current_line += (" " if current_line else "") + word
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
-        
-        # 添加缩进
-        indent_str = " " * indent
-        return ("\n" + "  │" + indent_str).join(lines) if lines else "无"
-
-    def save_text_report(self, report_text: str, filename: str) -> str:
-        """保存文本报告到文件。"""
         filepath = os.path.join(self.output_dir, filename)
         with open(filepath, "w", encoding="utf-8") as f:
-            f.write(report_text)
+            json.dump(results, f, ensure_ascii=False, indent=2, default=str)
+        return filepath
+
+    def print_summary(self, stats: Dict[str, Any]) -> None:
+        """
+        打印统计摘要。
+        
+        Args:
+            stats: 统计信息字典
+        """
+        print("\n" + "=" * 60)
+        print("分析摘要")
+        print("=" * 60)
+        print(f"总数: {stats.get('total', 0)}")
+        print(f"油价相关: {stats.get('oil_related', 0)}")
+        print(f"已跳过: {stats.get('skipped', 0)}")
+        
+        by_type = stats.get("by_type", {})
+        if by_type:
+            print("\n按人工分类分布:")
+            for category, count in sorted(by_type.items(), key=lambda x: x[1], reverse=True):
+                print(f"  - {category}: {count}")
+        print("=" * 60)
+
+    def generate_detailed_report(
+        self, 
+        events: List[Dict[str, Any]],
+        filename: Optional[str] = None
+    ) -> str:
+        """
+        生成详细的文本报告。
+        
+        Args:
+            events: 事件列表
+            filename: 文件名（默认按时间生成）
+            
+        Returns:
+            报告文件路径
+        """
+        if filename is None:
+            filename = f"detailed_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        
+        filepath = os.path.join(self.output_dir, filename)
+        
+        lines = [
+            "=" * 80,
+            "油价事件详细分析报告",
+            "=" * 80,
+            f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"事件总数: {len(events)}",
+            "",
+        ]
+        
+        # 按人工分类分组
+        by_type: Dict[str, List[Dict[str, Any]]] = {}
+        for event in events:
+            category = event.get("category") or "other"
+            by_type.setdefault(category, []).append(event)
+        
+        # 为每个类型生成报告
+        for category, type_events in sorted(by_type.items()):
+            lines.extend([
+                "-" * 80,
+                f"【{category.upper()}】 ({len(type_events)} 条)",
+                "-" * 80,
+            ])
+            
+            for idx, event in enumerate(type_events, 1):
+                lines.append(f"\n{idx}. {event.get('title', '未知标题')}")
+                lines.append(f"   日期: {event.get('date', 'N/A')}")
+                
+                # 如果是油价相关，显示详细分析
+                if event.get("is_oil_related"):
+                    lines.append(f"   关键词: {', '.join(event.get('keywords', []))}")
+                    
+                    if event.get("sentiment") is not None:
+                        lines.append(f"   情绪极性: {event.get('sentiment', 0):.2f}")
+                    
+                    if event.get("intensity") is not None:
+                        lines.append(f"   冲击强度: {event.get('intensity', 0):.2f}")
+                    
+                    if event.get("adjusted_intensity") is not None:
+                        lines.append(f"   校准强度: {event.get('adjusted_intensity', 0):.2f}")
+                    
+                    if event.get("transmission_path"):
+                        lines.append(f"   传导路径: {event.get('transmission_path')}")
+                else:
+                    lines.append(f"   跳过原因: {event.get('skip_reason', '与油价无关')}")
+        
+        lines.extend([
+            "",
+            "=" * 80,
+            "报告结束",
+            "=" * 80,
+        ])
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        
+        return filepath
+
+    def generate_category_report(
+        self,
+        events: List[Dict[str, Any]],
+        category: str,
+        filename: Optional[str] = None
+    ) -> str:
+        """
+        生成特定人工分类的报告。
+        
+        Args:
+            events: 事件列表
+            category: 人工分类
+            filename: 文件名
+            
+        Returns:
+            报告文件路径
+        """
+        filtered = [e for e in events if e.get("category") == category]
+        
+        if filename is None:
+            filename = f"{category}_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        filepath = os.path.join(self.output_dir, filename)
+        
+        report = {
+            "category": category,
+            "count": len(filtered),
+            "generated_at": datetime.now().isoformat(),
+            "events": filtered,
+        }
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+        
+        return filepath
+
+    def generate_statistics_summary(
+        self,
+        events: List[Dict[str, Any]],
+        filename: Optional[str] = None
+    ) -> str:
+        """
+        生成统计摘要JSON。
+        
+        Args:
+            events: 事件列表
+            filename: 文件名
+            
+        Returns:
+            文件路径
+        """
+        if filename is None:
+            filename = f"statistics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        # 计算统计信息
+        oil_related = [e for e in events if e.get("is_oil_related")]
+        
+        by_type: Dict[str, int] = {}
+        intensities: List[float] = []
+        sentiments: List[float] = []
+        
+        for event in oil_related:
+            category = event.get("category") or "other"
+            by_type[category] = by_type.get(category, 0) + 1
+            
+            if event.get("intensity") is not None:
+                intensities.append(event.get("intensity"))
+            
+            if event.get("sentiment") is not None:
+                sentiments.append(event.get("sentiment"))
+        
+        stats = {
+            "generated_at": datetime.now().isoformat(),
+            "total_events": len(events),
+            "oil_related_events": len(oil_related),
+            "skipped_events": len(events) - len(oil_related),
+            "event_types": by_type,
+            "intensity": {
+                "count": len(intensities),
+                "avg": sum(intensities) / len(intensities) if intensities else 0,
+                "max": max(intensities) if intensities else 0,
+                "min": min(intensities) if intensities else 0,
+            },
+            "sentiment": {
+                "count": len(sentiments),
+                "avg": sum(sentiments) / len(sentiments) if sentiments else 0,
+                "max": max(sentiments) if sentiments else 0,
+                "min": min(sentiments) if sentiments else 0,
+            },
+        }
+        
+        filepath = os.path.join(self.output_dir, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+        
         return filepath

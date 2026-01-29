@@ -22,7 +22,7 @@ HEADERS = {
 REQUEST_TIMEOUT = 10  # 秒
 
 # === LLM 配置 ===
-LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-xxxxxxxxxxxxxxxxxx")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-xxxxxxxxxxxxxxxxxxx")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_TEMPERATURE = 0.2

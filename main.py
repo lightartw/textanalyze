@@ -1,9 +1,9 @@
 """
 LLM文本因子分析主流程
-按照流程图执行：抓取 -> 分类 -> 量化 -> 校验 -> 聚合 -> 输出
+工作流：抓取 -> Agent1(事件分类) -> Agent2(IEA分析) -> Agent3(量化评估) -> Agent4(因果验证) -> 保存
 """
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
@@ -13,92 +13,111 @@ from crawler import SimpleCrawler
 from llm_client import LLMClient
 from workflow import WorkflowPipeline, WorkflowNode, NodeResult
 from workflow.nodes import NodeStatus
-from agents import TextFactorClassifier, FactorQuantifier, FactorValidator
+from agents import EventClassifier, IEAAnalyzer, SentimentIntensityScorer, CausalValidator
 from database import EventRepository
-from services import FactorAggregator, ReportGenerator
-from factor_interface import build_factor_series, export_factor_csv, export_factor_doc
 
 
 class TextFactorAnalyzer:
-    """文本因子分析器，聚焦非结构化新闻因子输出。"""
+    """文本因子分析器，4-Agent工作流。"""
 
     def __init__(self) -> None:
         self.llm = LLMClient()
         self.crawler = SimpleCrawler()
         self.repository = EventRepository(config.DATABASE_PATH)
-        self.aggregator = FactorAggregator()
-        self.reporter = ReportGenerator(config.REPORT_OUTPUT_DIR)
 
-        self.classifier = TextFactorClassifier(self.llm)
-        self.quantifier = FactorQuantifier(self.llm)
-        self.validator = FactorValidator(self.llm)
+        # 4个Agent
+        self.event_classifier = EventClassifier(self.llm)       # Agent1
+        self.iea_analyzer = IEAAnalyzer(self.llm)               # Agent2
+        self.sentiment_scorer = SentimentIntensityScorer(self.llm)  # Agent3
+        self.causal_validator = CausalValidator(self.llm)       # Agent4
 
         self.pipeline = self._build_pipeline()
-        self.daily_results: List[Dict[str, Any]] = []
         
         # 线程安全锁
-        self._results_lock = threading.Lock()
         self._print_lock = threading.Lock()
 
     def _build_pipeline(self) -> WorkflowPipeline:
-        """构建文本因子工作流。"""
+        """构建4-Agent文本因子工作流。"""
         pipeline = WorkflowPipeline(name="TextFactorPipeline")
 
+        # 1. 抓取新闻正文
         pipeline.register(
             WorkflowNode(
                 name="crawl",
                 handler=self._node_crawl,
                 description="抓取新闻正文",
-                next_node="agent_classify",
+                next_node="agent1_classify",
             )
         )
+        
+        # 2. Agent1: 事件分类
         pipeline.register(
             WorkflowNode(
-                name="agent_classify",
-                handler=self._node_classify,
-                description="Agent1: 文本因子分类",
+                name="agent1_classify",
+                handler=self._node_agent1_classify,
+                description="Agent1: 事件分类与油价关联判断",
                 condition_field="is_oil_related",
-                condition_true="agent_quantify",
+                condition_true="agent2_iea_analyze",
                 condition_false="mark_skip",
             )
         )
+        
+        # 3. 标记跳过（非油价相关）
         pipeline.register(
             WorkflowNode(
                 name="mark_skip",
                 handler=self._node_mark_skip,
-                description="标记无关新闻",
+                description="标记非油价相关新闻",
                 next_node="save_event",
             )
         )
+        
+        # 4. Agent2: IEA分析
         pipeline.register(
             WorkflowNode(
-                name="agent_quantify",
-                handler=self._node_quantify,
-                description="Agent2: 因子量化",
+                name="agent2_iea_analyze",
+                handler=self._node_agent2_iea_analyze,
+                description="Agent2: IEA实体与传导路径分析",
+                next_node="agent3_sentiment_score",
+            )
+        )
+        
+        # 5. Agent3: 情绪量化
+        pipeline.register(
+            WorkflowNode(
+                name="agent3_sentiment_score",
+                handler=self._node_agent3_sentiment_score,
+                description="Agent3: 情绪极性与冲击强度评估",
                 next_node="db_query",
             )
         )
+        
+        # 6. 查询历史同类事件
         pipeline.register(
             WorkflowNode(
                 name="db_query",
                 handler=self._node_query_similar,
                 description="查询历史同类事件",
-                next_node="agent_validate",
+                next_node="agent4_causal_validate",
             )
         )
+        
+        # 7. Agent4: 因果验证
         pipeline.register(
             WorkflowNode(
-                name="agent_validate",
-                handler=self._node_validate,
-                description="Agent3: 因子校验",
+                name="agent4_causal_validate",
+                handler=self._node_agent4_causal_validate,
+                description="Agent4: 因果验证与强度校准",
                 next_node="save_event",
             )
         )
+        
+        # 8. 保存结果
         pipeline.register(
             WorkflowNode(
                 name="save_event",
                 handler=self._node_save_event,
-                description="保存事件",
+                description="保存事件到数据库",
                 next_node=None,
             )
         )
@@ -108,8 +127,7 @@ class TextFactorAnalyzer:
 
     def _node_crawl(self, context: Dict[str, Any]) -> NodeResult:
         """抓取新闻正文。"""
-        news_item = context.get("news_item")
-        url = news_item.url if hasattr(news_item, "url") else news_item.get("url", "")
+        url = context.get("url", "")
         if not url:
             return NodeResult(status=NodeStatus.FAILED, error="URL为空")
 
@@ -119,35 +137,47 @@ class TextFactorAnalyzer:
 
         return NodeResult(status=NodeStatus.SUCCESS, data={"content": content})
 
-    def _node_classify(self, context: Dict[str, Any]) -> NodeResult:
-        """文本因子分类。"""
-        news_item = context.get("news_item")
-        title = news_item.title if hasattr(news_item, "title") else news_item.get("title", "")
-        content = context.get("content", "")
-
-        result = self.classifier.execute({"title": title, "content": content})
+    def _node_agent1_classify(self, context: Dict[str, Any]) -> NodeResult:
+        """Agent1: 事件分类与油价关联判断。"""
+        result = self.event_classifier.execute({
+            "title": context.get("title", ""),
+            "content": context.get("content", ""),
+        })
         if not result.success:
             return NodeResult(status=NodeStatus.FAILED, error=result.error)
 
         return NodeResult(status=NodeStatus.SUCCESS, data=result.data)
 
     def _node_mark_skip(self, context: Dict[str, Any]) -> NodeResult:
-        """标记无关新闻。"""
+        """标记非油价相关新闻。"""
         return NodeResult(
             status=NodeStatus.SKIPPED,
-            data={"status": "skipped", "skip_reason": "与油价无关"},
+            data={"skip_reason": "与油价无关"},
         )
 
-    def _node_quantify(self, context: Dict[str, Any]) -> NodeResult:
-        """量化因子值。"""
-        news_item = context.get("news_item")
-        title = news_item.title if hasattr(news_item, "title") else news_item.get("title", "")
-        content = context.get("content", "")
-        category = context.get("factor_category", "unrelated")
+    def _node_agent2_iea_analyze(self, context: Dict[str, Any]) -> NodeResult:
+        """Agent2: IEA实体与传导路径分析。"""
+        result = self.iea_analyzer.execute({
+            "title": context.get("title", ""),
+            "content": context.get("content", ""),
+            "event_type": context.get("event_type", ""),
+            "keywords": context.get("keywords", []),
+        })
+        if not result.success:
+            return NodeResult(status=NodeStatus.FAILED, error=result.error)
 
-        result = self.quantifier.execute(
-            {"title": title, "content": content, "factor_category": category}
-        )
+        return NodeResult(status=NodeStatus.SUCCESS, data=result.data)
+
+    def _node_agent3_sentiment_score(self, context: Dict[str, Any]) -> NodeResult:
+        """Agent3: 情绪极性与冲击强度评估。"""
+        result = self.sentiment_scorer.execute({
+            "title": context.get("title", ""),
+            "content": context.get("content", ""),
+            "event_type": context.get("event_type", ""),
+            "key_entities": context.get("key_entities", []),
+            "quantitative_metrics": context.get("quantitative_metrics", {}),
+            "transmission_path": context.get("transmission_path", ""),
+        })
         if not result.success:
             return NodeResult(status=NodeStatus.FAILED, error=result.error)
 
@@ -155,94 +185,56 @@ class TextFactorAnalyzer:
 
     def _node_query_similar(self, context: Dict[str, Any]) -> NodeResult:
         """查询历史同类事件。"""
-        factor_category = context.get("factor_category", "unrelated")
+        category = context.get("category", "")
         similar_events = self.repository.get_similar_events(
-            factor_category=factor_category,
+            category=category,
             days_back=config.SIMILAR_EVENTS_DAYS,
             limit=config.SIMILAR_EVENTS_LIMIT,
         )
         return NodeResult(status=NodeStatus.SUCCESS, data={"similar_events": similar_events})
 
-    def _node_validate(self, context: Dict[str, Any]) -> NodeResult:
-        """校验因子量化结果。"""
-        news_item = context.get("news_item")
-        title = news_item.title if hasattr(news_item, "title") else news_item.get("title", "")
-        content = context.get("content", "")
-
-        result = self.validator.execute(
-            {
-                "title": title,
-                "content": content,
-                "factor_category": context.get("factor_category", "unrelated"),
-                "factor_value": context.get("factor_value", 0),
-                "similar_events": context.get("similar_events", []),
-            }
-        )
+    def _node_agent4_causal_validate(self, context: Dict[str, Any]) -> NodeResult:
+        """Agent4: 因果验证与强度校准。"""
+        result = self.causal_validator.execute({
+            "title": context.get("title", ""),
+            "content": context.get("content", ""),
+            "event_type": context.get("event_type", ""),
+            "transmission_path": context.get("transmission_path", ""),
+            "sentiment": context.get("sentiment", 0),
+            "intensity": context.get("intensity", 0),
+            "confidence": context.get("confidence", 0),
+            "reasoning": context.get("reasoning", {}),
+            "similar_events": context.get("similar_events", []),
+        })
         if not result.success:
+            # 失败时使用Agent3的原始值
             return NodeResult(
                 status=NodeStatus.SUCCESS,
                 data={
-                    "is_valid": False,
-                    "adjusted_factor_value": context.get("factor_value", 0),
-                    "adjustment_reason": result.error or "校验失败",
+                    "is_causal": False,
+                    "adjusted_intensity": context.get("intensity", 0),
+                    "logic_analysis": {},
+                    "final_confidence": context.get("confidence", 0),
+                    "warning": result.error or "因果验证失败",
                 },
             )
 
         return NodeResult(status=NodeStatus.SUCCESS, data=result.data)
 
     def _node_save_event(self, context: Dict[str, Any]) -> NodeResult:
-        """保存事件到数据库，并收集结果。"""
-        news_item = context.get("news_item")
-        event_data = {
-            "news_id": news_item.id if hasattr(news_item, "id") else news_item.get("id", ""),
-            "title": news_item.title if hasattr(news_item, "title") else news_item.get("title", ""),
-            "url": news_item.url if hasattr(news_item, "url") else news_item.get("url", ""),
-            "source_category": news_item.category
-            if hasattr(news_item, "category")
-            else news_item.get("category", ""),
-            "event_date": self._parse_date(
-                news_item.date if hasattr(news_item, "date") else news_item.get("date", "")
-            ),
-            "raw_content": context.get("content", ""),
-            "is_oil_related": context.get("is_oil_related", False),
-            "factor_category": context.get("factor_category", "unrelated"),
-            "classify_confidence": context.get("confidence", 0),
-            "classify_reason": context.get("brief_reason", ""),
-            "keywords_found": context.get("keywords_found", []),
-            "factor_value": context.get("factor_value", 0),
-            "impact_magnitude": context.get("impact_magnitude", ""),
-            "time_horizon": context.get("time_horizon", ""),
-            "quantification_logic": context.get("quantification_logic", ""),
-            "is_valid": context.get("is_valid", True),
-            "adjusted_factor_value": context.get("adjusted_factor_value", context.get("factor_value", 0)),
-            "adjustment_reason": context.get("adjustment_reason", ""),
-            "historical_consistency": context.get("historical_consistency", ""),
-        }
-
+        """保存事件到数据库。"""
         try:
-            self.repository.save_event(event_data)
-            # 线程安全地添加结果
-            with self._results_lock:
-                self.daily_results.append(event_data)
+            # 直接保存完整的context到数据库
+            self.repository.save(context)
             return NodeResult(status=NodeStatus.SUCCESS, data={"saved": True})
         except Exception as e:
             return NodeResult(status=NodeStatus.FAILED, error=f"保存失败: {e}")
 
     def _process_single_item(self, item: Any, item_index: int, total: int) -> bool:
-        """
-        处理单条新闻（供线程池调用）。
-        
-        Args:
-            item: 新闻条目
-            item_index: 当前索引（用于日志）
-            total: 总数（用于日志）
-            
-        Returns:
-            bool: 是否处理成功
-        """
+        """处理单条新闻。"""
         try:
-            context = {"news_item": item}
-            title = item.title if hasattr(item, "title") else item.get("title", "未知")
+            context = self._build_context(item)
+            title = context.get("title", "未知")
             
             with self._print_lock:
                 print(f"\n[Parallel] 开始处理 [{item_index + 1}/{total}]: {title[:50]}...")
@@ -259,48 +251,64 @@ class TextFactorAnalyzer:
                 print(f"[Parallel] 处理异常 [{item_index + 1}/{total}]: {e}")
             return False
 
+    def _build_context(self, item: Any) -> Dict[str, Any]:
+        """将NewsItem对象展开为context字典。"""
+        if hasattr(item, "id"):
+            return {
+                "id": item.id,
+                "title": item.title,
+                "date": item.date,
+                "category": item.category,
+                "url": item.url,
+            }
+        else:
+            return {
+                "id": item.get("id", ""),
+                "title": item.get("title", ""),
+                "date": item.get("date", ""),
+                "category": item.get("category", ""),
+                "url": item.get("url", ""),
+            }
+
     def analyze_batch(
         self, 
         news_items: List[Any], 
-        max_workers: int = None,
-        parallel: bool = None
+        max_workers: Optional[int] = None,
+        parallel: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
-        批量分析新闻并输出因子文件。
+        批量分析新闻并保存到数据库。
         
         Args:
             news_items: 新闻列表
-            max_workers: 最大并行线程数（默认从config读取）
-            parallel: 是否启用并行（默认从config读取）
+            max_workers: 最大并行线程数
+            parallel: 是否启用并行
             
         Returns:
-            分析结果摘要
+            分析统计结果（仅包含处理统计，不包含报告）
         """
-        self.daily_results = []
         total = len(news_items)
         
-        # 读取配置
         if parallel is None:
             parallel = config.PARALLEL_ENABLED
         if max_workers is None:
             max_workers = config.MAX_WORKERS
         
+        # 执行分析
+        success_count = 0
+        fail_count = 0
+        
         if parallel and total > 1:
-            # 并行处理模式
             print(f"\n{'='*60}")
             print(f"[Parallel] 启动并行处理模式，线程数: {max_workers}，任务数: {total}")
             print(f"{'='*60}")
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # 提交所有任务
                 futures = {
                     executor.submit(self._process_single_item, item, idx, total): idx
                     for idx, item in enumerate(news_items)
                 }
                 
-                # 收集结果
-                success_count = 0
-                fail_count = 0
                 for future in as_completed(futures):
                     try:
                         if future.result():
@@ -315,79 +323,101 @@ class TextFactorAnalyzer:
             print(f"[Parallel] 并行处理完成，成功: {success_count}，失败: {fail_count}")
             print(f"{'='*60}\n")
         else:
-            # 串行处理模式（保持兼容）
             print(f"\n[Serial] 串行处理模式，任务数: {total}")
             for idx, item in enumerate(news_items):
                 print(f"\n[Serial] 处理 [{idx + 1}/{total}]")
-                context = {"news_item": item}
-                self.pipeline.run(context)
+                context = self._build_context(item)
+                result = self.pipeline.run(context)
+                if result.success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+        
+        return {
+            "total": total,
+            "success": success_count,
+            "failed": fail_count,
+        }
 
-        summary = self.aggregator.aggregate(self.daily_results)
-        self.repository.save_daily_summary(summary)
 
-        report_text = self.reporter.generate_summary(summary)
-        report_name = f"factor_summary_{datetime.now().strftime('%Y%m%d')}.txt"
-        self.reporter.save_text_report(report_text, report_name)
-
-        factor_outputs = self._export_factor_series()
-        return {"summary": summary, "factor_outputs": factor_outputs}
-
-    def _export_factor_series(self) -> Dict[str, str]:
-        """导出各类因子序列和说明文档。"""
-        outputs: Dict[str, str] = {}
-        by_category: Dict[str, List[Dict[str, Any]]] = {}
-        for event in self.daily_results:
-            if not event.get("is_oil_related", False):
-                continue
-            category = event.get("factor_category", "unrelated")
-            by_category.setdefault(category, []).append(event)
-
-        for category, events in by_category.items():
-            factor_name = f"{category}_factor_v1"
-            series = build_factor_series(events, factor_name, config.FACTOR_FREQUENCY)
-            csv_path = export_factor_csv(series, config.FACTOR_OUTPUT_DIR)
-            doc_path = export_factor_doc(
-                {
-                    "factor_name": factor_name,
-                    "data_source": "新闻数据",
-                    "logic": "LLM文本因子分类与量化",
-                    "coverage": "按输入新闻覆盖范围",
-                    "frequency": config.FACTOR_FREQUENCY,
-                    "formula": "factor_value = LLM_quantify(text)",
-                },
-                config.REPORT_OUTPUT_DIR,
-            )
-            outputs[factor_name] = f"{csv_path} | {doc_path}"
-
-        return outputs
-
-    def _parse_date(self, date_str: str) -> datetime:
-        """解析日期字符串。"""
-        if not date_str:
-            return datetime.now()
-        formats = ["%Y-%m-%d", "%Y/%m/%d", "%Y年%m月%d日", "%Y-%m-%d %H:%M:%S"]
-        for fmt in formats:
-            try:
-                return datetime.strptime(date_str, fmt)
-            except ValueError:
-                continue
-        return datetime.now()
+def generate_report(
+    repository: EventRepository,
+    oil_related_only: bool = False,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    从数据库读取数据生成报告。
+    
+    Args:
+        repository: 数据库仓库实例
+        oil_related_only: 是否只统计油价相关事件
+        limit: 限制返回数量
+        
+    Returns:
+        报告统计信息
+    """
+    from services import FactorAggregator, ReportGenerator
+    
+    aggregator = FactorAggregator()
+    reporter = ReportGenerator(config.REPORT_OUTPUT_DIR)
+    
+    # 从数据库读取数据
+    print("\n从数据库读取数据...")
+    events = repository.get_all(oil_related_only=oil_related_only, limit=limit)
+    print(f"读取到 {len(events)} 条记录")
+    
+    if not events:
+        print("数据库中没有数据")
+        return {
+            "stats": {"total": 0, "oil_related": 0, "skipped": 0, "by_type": {}},
+            "total_in_db": 0,
+            "output_file": None,
+        }
+    
+    # 统计
+    stats = aggregator.aggregate(events)
+    
+    # 保存JSON报告
+    output_file = reporter.save_results(events)
+    
+    # 打印摘要
+    reporter.print_summary(stats)
+    
+    return {
+        "stats": stats,
+        "total_in_db": len(events),
+        "output_file": output_file,
+    }
 
 
 def main() -> None:
     """主入口函数。"""
+    # 1. 加载数据
     items = DataLoader.load_data(config.INPUT_FILE)
     if not items:
         print("[Error] 没有加载到任何数据")
         return
 
+    # 2. 初始化分析器
     analyzer = TextFactorAnalyzer()
-    result = analyzer.analyze_batch(items)
-    summary = result["summary"]
-    print("文本因子分析完成")
-    print(f"总事件数: {summary.get('total_events', 0)}")
-    print(f"油价相关事件: {summary.get('oil_related_events', 0)}")
-    print(f"平均因子值: {summary.get('avg_factor_value', 0)}")
+    
+    # 3. 执行分析（只做分析和存储）
+    print("\n开始分析...")
+    analysis_result = analyzer.analyze_batch(items)
+    
+    print(f"\n分析完成！")
+    print(f"总计: {analysis_result['total']} 条")
+    print(f"成功: {analysis_result['success']} 条")
+    print(f"失败: {analysis_result['failed']} 条")
+    
+    # 4. 生成报告（独立的报告生成逻辑）
+    print("\n生成报告...")
+    report_result = generate_report(analyzer.repository)
+    
+    print(f"\n报告生成完成！")
+    print(f"数据库中共有: {report_result['total_in_db']} 条记录")
+    if report_result['output_file']:
+        print(f"报告已保存至: {report_result['output_file']}")
 
 
 if __name__ == "__main__":

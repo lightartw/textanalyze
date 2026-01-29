@@ -1,18 +1,16 @@
 # database/repository.py
 """
-数据库操作封装
-提供文本因子事件的读写接口
+数据库操作封装 - 通用事件存储接口
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
-from sqlalchemy import func, and_
 from sqlalchemy.orm import Session
 
-from .models import TextFactorEvent, DailyFactorSummary, init_database
+from .models import EventRecord, init_database
 
 
 class EventRepository:
-    """文本因子事件仓库。"""
+    """事件存储仓库 - 通用接口。"""
 
     def __init__(self, db_path: str = "data/text_factor.db"):
         """初始化数据库连接。"""
@@ -23,137 +21,128 @@ class EventRepository:
         """获取数据库会话。"""
         return self.SessionClass()
 
-    def save_event(self, event_data: Dict[str, Any]) -> TextFactorEvent:
-        """保存或更新文本因子事件。"""
+    def save(self, data: Dict[str, Any]) -> EventRecord:
+        """
+        保存事件数据。
+        
+        Args:
+            data: 完整的事件数据字典，必须包含 'id' 字段作为 news_id
+            
+        Returns:
+            EventRecord: 保存的记录
+        """
         session = self.get_session()
         try:
-            news_id = event_data.get("news_id")
-            existing = session.query(TextFactorEvent).filter_by(news_id=news_id).first()
+            news_id = str(data.get("id", ""))
+            if not news_id:
+                raise ValueError("数据必须包含 'id' 字段")
+            
+            # 提取索引字段
+            event_date = self._parse_date(data.get("date", ""))
+            is_oil_related = bool(data.get("is_oil_related", False))
+            category = data.get("category")
+            
+            # 查找是否已存在
+            existing = session.query(EventRecord).filter_by(news_id=news_id).first()
+            
             if existing:
-                for key, value in event_data.items():
-                    if hasattr(existing, key) and key != "id":
-                        setattr(existing, key, value)
-                existing.updated_at = datetime.utcnow()
-                event = existing
+                # 更新
+                existing.event_date = event_date
+                existing.is_oil_related = is_oil_related
+                existing.category = category
+                existing.data = data
+                existing.updated_at = datetime.now(timezone.utc)
+                record = existing
             else:
-                event = TextFactorEvent(**event_data)
-                session.add(event)
+                # 新建
+                record = EventRecord(
+                    news_id=news_id,
+                    event_date=event_date,
+                    is_oil_related=is_oil_related,
+                    category=category,
+                    data=data,
+                )
+                session.add(record)
+            
             session.commit()
-            session.refresh(event)
-            return event
+            session.refresh(record)
+            return record
         except Exception as e:
             session.rollback()
             raise e
         finally:
             session.close()
 
-    def get_event_by_news_id(self, news_id: str) -> Optional[TextFactorEvent]:
-        """根据新闻ID获取事件。"""
+    def get_by_id(self, news_id: str) -> Optional[Dict[str, Any]]:
+        """根据新闻ID获取事件数据。"""
         session = self.get_session()
         try:
-            return session.query(TextFactorEvent).filter_by(news_id=news_id).first()
+            record = session.query(EventRecord).filter_by(news_id=news_id).first()
+            return record.to_dict() if record else None
         finally:
             session.close()
 
     def get_similar_events(
         self,
-        factor_category: Optional[str] = None,
+        category: Optional[str] = None,
         days_back: int = 30,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """获取历史同类文本因子事件。"""
+        """获取历史同类事件。"""
         session = self.get_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days_back)
-            query = session.query(TextFactorEvent).filter(
-                TextFactorEvent.is_oil_related == True,
-                TextFactorEvent.created_at >= cutoff_date,
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_back)
+            query = session.query(EventRecord).filter(
+                EventRecord.is_oil_related == True,
+                EventRecord.created_at >= cutoff_date,
             )
-            if factor_category:
-                query = query.filter(TextFactorEvent.factor_category == factor_category)
-            events = query.order_by(
-                func.abs(TextFactorEvent.adjusted_factor_value).desc()
-            ).limit(limit).all()
-            return [e.to_dict() for e in events]
+            if category:
+                query = query.filter(EventRecord.category == category)
+            
+            records = query.order_by(EventRecord.created_at.desc()).limit(limit).all()
+            return [r.to_dict() for r in records]
         finally:
             session.close()
 
-    def get_events_by_date(
+    def get_all(
         self,
-        target_date: datetime,
-        oil_related_only: bool = True,
-    ) -> List[TextFactorEvent]:
-        """获取指定日期的事件列表。"""
+        oil_related_only: bool = False,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取所有事件。"""
         session = self.get_session()
         try:
-            start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            end = start + timedelta(days=1)
-            query = session.query(TextFactorEvent).filter(
-                and_(TextFactorEvent.event_date >= start, TextFactorEvent.event_date < end)
-            )
+            query = session.query(EventRecord)
             if oil_related_only:
-                query = query.filter(TextFactorEvent.is_oil_related == True)
-            return query.all()
+                query = query.filter(EventRecord.is_oil_related == True)
+            query = query.order_by(EventRecord.created_at.desc())
+            if limit:
+                query = query.limit(limit)
+            return [r.to_dict() for r in query.all()]
         finally:
             session.close()
 
-    def save_daily_summary(self, summary_data: Dict[str, Any]) -> DailyFactorSummary:
-        """保存或更新日度因子汇总。"""
+    def count(self, oil_related_only: bool = False) -> int:
+        """统计事件数量。"""
         session = self.get_session()
         try:
-            summary_date = summary_data.get("summary_date")
-            existing = session.query(DailyFactorSummary).filter_by(
-                summary_date=summary_date
-            ).first()
-            if existing:
-                for key, value in summary_data.items():
-                    if hasattr(existing, key) and key != "id":
-                        setattr(existing, key, value)
-                existing.updated_at = datetime.utcnow()
-                summary = existing
-            else:
-                summary = DailyFactorSummary(**summary_data)
-                session.add(summary)
-            session.commit()
-            session.refresh(summary)
-            return summary
-        except Exception as e:
-            session.rollback()
-            raise e
+            query = session.query(EventRecord)
+            if oil_related_only:
+                query = query.filter(EventRecord.is_oil_related == True)
+            return query.count()
         finally:
             session.close()
 
-    def get_daily_summary(self, target_date: datetime) -> Optional[DailyFactorSummary]:
-        """获取指定日期的汇总。"""
-        session = self.get_session()
-        try:
-            date_only = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            return session.query(DailyFactorSummary).filter_by(summary_date=date_only).first()
-        finally:
-            session.close()
-
-    def get_statistics(self, days_back: int = 30) -> Dict[str, Any]:
-        """获取文本因子统计信息。"""
-        session = self.get_session()
-        try:
-            cutoff = datetime.utcnow() - timedelta(days=days_back)
-            total = session.query(func.count(TextFactorEvent.id)).filter(
-                TextFactorEvent.created_at >= cutoff
-            ).scalar()
-            related = session.query(func.count(TextFactorEvent.id)).filter(
-                TextFactorEvent.created_at >= cutoff,
-                TextFactorEvent.is_oil_related == True,
-            ).scalar()
-            avg_value = session.query(func.avg(TextFactorEvent.adjusted_factor_value)).filter(
-                TextFactorEvent.created_at >= cutoff,
-                TextFactorEvent.is_oil_related == True,
-            ).scalar()
-            return {
-                "total_events": total or 0,
-                "oil_related_events": related or 0,
-                "unrelated_events": (total or 0) - (related or 0),
-                "avg_factor_value": round(avg_value or 0, 4),
-                "period_days": days_back,
-            }
-        finally:
-            session.close()
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        """解析日期字符串。"""
+        if not date_str:
+            return None
+        if isinstance(date_str, datetime):
+            return date_str
+        formats = ["%Y-%m-%d", "%Y/%m/%d", "%Y年%m月%d日", "%Y-%m-%d %H:%M:%S"]
+        for fmt in formats:
+            try:
+                return datetime.strptime(str(date_str), fmt)
+            except ValueError:
+                continue
+        return None
