@@ -22,9 +22,9 @@ HEADERS = {
 REQUEST_TIMEOUT = 10  # 秒
 
 # === LLM 配置 ===
-LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-xxxxxxxxxxxxxxxxxxx")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+LLM_API_KEY = os.getenv("DASHSCOPE_API_KEY", "你的DashScope API密钥")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen3-plus")
 LLM_TEMPERATURE = 0.2
 LLM_TIMEOUT = 60  # 秒
 

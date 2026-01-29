@@ -133,7 +133,10 @@ class TextFactorAnalyzer:
 
         content = self.crawler.fetch_text(url)
         if not content:
-            return NodeResult(status=NodeStatus.FAILED, error="抓取内容为空")
+            # 抓取失败时，使用标题作为内容，以便工作流继续执行
+            title = context.get("title", "")
+            print(f"[Crawler] 使用标题作为内容: {title[:50]}...")
+            content = f"标题: {title}\n内容: 无法从URL获取正文，使用标题作为内容。"
 
         return NodeResult(status=NodeStatus.SUCCESS, data={"content": content})
 
