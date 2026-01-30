@@ -10,6 +10,7 @@ INPUT_FILE = "data/input.csv"
 OUTPUT_DIR = "output"
 FACTOR_OUTPUT_DIR = "output/factors"
 REPORT_OUTPUT_DIR = "output/reports"
+DAILY_REPORT_OUTPUT_DIR = "output/daily_reports"
 
 # === 数据库配置 ===
 DATABASE_PATH = "data/text_factor.db"
@@ -45,3 +46,9 @@ WORKFLOW_RETRY_COUNT = 2  # 节点失败重试次数
 # === 并行处理配置 ===
 MAX_WORKERS = 5  # 并行处理的最大线程数
 PARALLEL_ENABLED = True  # 是否启用并行处理
+
+# === 每日报告配置 ===
+DAILY_REPORT_DAYS_BACK = 7  # 每日报告分析的历史天数
+DAILY_REPORT_MAX_EVENTS = 50  # 每日报告分析的最大事件数
+DAILY_REPORT_DETAILED = True  # 是否生成详细报告
+DAILY_REPORT_SUMMARY = True  # 是否生成摘要报告

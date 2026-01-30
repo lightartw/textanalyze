@@ -10,6 +10,7 @@
 textanalyze/
 ├── main.py                    # 主程序入口（分析流程）
 ├── generate_report.py         # 独立报告生成脚本
+├── generate_daily_report.py   # 每日综合分析报告生成脚本
 ├── config.py                  # 配置文件
 ├── crawler.py                 # 网页爬虫
 ├── data_loader.py             # 数据加载器
@@ -21,7 +22,8 @@ textanalyze/
 │   ├── text_factor_classifier.py  # Agent1: 事件分类
 │   ├── iea_analyzer.py        # Agent2: IEA分析
 │   ├── sentiment_scorer.py    # Agent3: 情绪量化
-│   └── factor_validator.py    # Agent4: 因果验证
+│   ├── factor_validator.py    # Agent4: 因果验证
+│   ├── daily_summary_agent.py # Agent5: 每日综合分析
 │   ├── prompt/                # Agent提示词目录
 │       ├── text_factor_classifier/  # 事件分类提示词
 │       ├── sentiment_scorer/        # 情绪评分提示词
@@ -48,8 +50,9 @@ textanalyze/
 │   ├── test_input.csv         # 测试输入数据
 │   └── text_factor.db         # SQLite数据库
 │
-└── output/
-    └── reports/               # 报告输出目录
+├── output/
+    ├── reports/               # 报告输出目录
+    └── daily_reports/         # 每日综合分析报告输出目录
 ```
 
 ---
@@ -86,6 +89,12 @@ textanalyze/
   - 分析传导路径的完整性
   - 识别混杂变量和历史一致性
 
+- **Agent5: DailySummaryAgent（每日综合分析器）**
+  - 生成包含长短期风险评估的每日综合分析报告
+  - 识别最需关注的事件并提供详细分析
+  - 按利益相关者分类提供油价风险应对策略
+  - 设计监控指标与预警系统
+
 ## 快速开始
 
 ### 1. 安装依赖
@@ -117,6 +126,11 @@ D:/PYTHON/python.exe -m pip install pandas requests beautifulsoup4 sqlalchemy
 | `MAX_CONTENT_LENGTH` | LLM 最大内容长度 | 1000000 |
 | `PARALLEL_ENABLED` | 是否启用并行处理 | `True` |
 | `MAX_WORKERS` | 最大并行线程数 | 5 |
+| `DAILY_REPORT_OUTPUT_DIR` | 每日报告输出目录 | `output/daily_reports` |
+| `DAILY_REPORT_DAYS_BACK` | 每日报告分析的历史天数 | 7 |
+| `DAILY_REPORT_MAX_EVENTS` | 每日报告分析的最大事件数 | 50 |
+| `DAILY_REPORT_DETAILED` | 是否生成详细报告 | `True` |
+| `DAILY_REPORT_SUMMARY` | 是否生成摘要报告 | `True` |
 
 #### 支持的LLM配置
 
@@ -189,6 +203,28 @@ python generate_report.py --event-type geopolitical
 python clear_database.py
 ```
 
+### 7. 生成每日综合分析报告
+
+```bash
+# 生成当天的综合分析报告
+python generate_daily_report.py
+
+# 生成指定日期的报告
+python generate_daily_report.py --date 2026-01-30
+
+# 分析过去14天的数据
+python generate_daily_report.py --days-back 14
+
+# 最多分析100个事件
+python generate_daily_report.py --max-events 100
+
+# 只生成详细报告
+python generate_daily_report.py --detailed
+
+# 只生成摘要报告
+python generate_daily_report.py --summary
+```
+
 ## 数据库结构
 - EventRecord 表（通用 JSON 存储）
 
@@ -205,6 +241,8 @@ python clear_database.py
 
 ## 报告输出
 
+### 常规分析报告
+
 分析完成后，报告将保存在 `output/reports/` 目录中，文件名格式为 `results_YYYYMMDD_HHMMSS.json`。
 
 报告包含以下信息：
@@ -213,6 +251,25 @@ python clear_database.py
 - 情绪极性和冲击强度评分
 - 因果验证结果
 - 详细的推理过程
+
+### 每日综合分析报告
+
+每日综合分析报告将保存在 `output/daily_reports/` 目录中，包含以下格式：
+- `daily_report_YYYY-MM-DD.json`：JSON格式的完整报告
+- `daily_report_YYYY-MM-DD.txt`：文本格式的详细报告
+- `daily_summary_YYYY-MM-DD.txt`：文本格式的摘要报告
+
+每日综合分析报告包含以下信息：
+- 市场总体概况
+- 短期风险评估（1-7天）：风险等级、评估结果、走势预测、主要风险因素
+- 长期风险评估（7-30天）：风险等级、评估结果、走势预测、主要风险因素
+- 重点关注事件：识别最需关注的5个事件及其潜在影响
+- 事件关联性分析：分析不同事件之间的关联性和可能的连锁反应
+- 油价风险应对策略：
+  - 短期应对策略：针对短期风险的应急措施
+  - 长期战略建议：针对长期风险的战略性管理建议
+  - 按利益相关者分类建议：为生产者、消费者、投资者、政策制定者提供定制化建议
+  - 监控指标与预警系统：建议关键监控指标和预警系统
 
 ## 故障排除
 
